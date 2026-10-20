@@ -1,0 +1,25 @@
+# No :latest tags. A tag that can change without a commit is not GitOps.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow the latest image tag
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-pinned-tag
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["api", "worker"]
+      validate:
+        message: "Image tags must be pinned (no :latest, no implicit tag). Use a digest or a version tag."
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"

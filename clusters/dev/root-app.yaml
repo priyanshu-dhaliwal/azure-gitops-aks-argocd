@@ -1,0 +1,171 @@
+# Root app-of-apps for the dev cluster.
+#
+# Everything Argo manages in this cluster is generated from this file. Adding a
+# platform add-on or a workload is a change here (or in the ApplicationSet below),
+# reviewed in a PR, and nothing else.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - list:
+        elements:
+          # Sync waves are the dependency order. Nothing that needs a CRD is
+          # applied before the controller that installs it is healthy.
+          - name: ingress-nginx
+            path: platform/ingress-nginx
+            wave: "-10"
+          - name: cert-manager
+            path: platform/cert-manager
+            wave: "-9"
+          - name: external-secrets
+            path: platform/external-secrets
+            wave: "-8"
+          - name: kyverno
+            path: platform/kyverno
+            wave: "-7"
+          - name: kube-prometheus-stack
+            path: platform/kube-prometheus-stack
+            wave: "-6"
+  template:
+    metadata:
+      name: "{{.name}}"
+      namespace: argocd
+      annotations:
+        argocd.argoproj.io/sync-wave: "{{.wave}}"
+      labels:
+        platform-component: "true"
+        environment: dev
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: platform
+      source:
+        repoURL: https://github.com/priyanshu-dhaliwal/azure-gitops-aks-argocd.git
+        targetRevision: main
+        path: "{{.path}}"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{.name}}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 3m
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: workloads
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - list:
+        elements:
+          - name: api
+            path: apps/overlays/dev/api
+            wave: "1"
+          - name: worker
+            path: apps/overlays/dev/worker
+            wave: "2"
+  template:
+    metadata:
+      name: "{{.name}}"
+      namespace: argocd
+      annotations:
+        argocd.argoproj.io/sync-wave: "{{.wave}}"
+      labels:
+        environment: dev
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: workloads
+      source:
+        repoURL: https://github.com/priyanshu-dhaliwal/azure-gitops-aks-argocd.git
+        targetRevision: main
+        path: "{{.path}}"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{.name}}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+spec:
+  description: Platform add-ons owned by the platform team
+  sourceRepos:
+    - https://github.com/priyanshu-dhaliwal/azure-gitops-aks-argocd.git
+    - https://argoproj.github.io/argo-helm
+    - https://kubernetes.github.io/ingress-nginx
+    - https://charts.jetstack.io
+    - https://charts.external-secrets.io
+    - https://kyverno.github.io/kyverno
+    - https://prometheus-community.github.io/helm-charts
+  destinations:
+    - namespace: "*"
+      server: https://kubernetes.default.svc
+  # Platform components need cluster-scoped objects (CRDs, ClusterRoles).
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: workloads
+  namespace: argocd
+spec:
+  description: Application workloads — namespace-scoped only
+  sourceRepos:
+    - https://github.com/priyanshu-dhaliwal/azure-gitops-aks-argocd.git
+  destinations:
+    - namespace: api
+      server: https://kubernetes.default.svc
+    - namespace: worker
+      server: https://kubernetes.default.svc
+  # Workloads may NOT create cluster-scoped resources. This is what stops a
+  # workload PR from granting itself a ClusterRole.
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: "*"
+    - group: "apps"
+      kind: "*"
+    - group: "networking.k8s.io"
+      kind: "*"
+    - group: "autoscaling"
+      kind: "*"
+    - group: "policy"
+      kind: "*"
+    - group: "external-secrets.io"
+      kind: "*"
+    - group: "argoproj.io"
+      kind: "Rollout"

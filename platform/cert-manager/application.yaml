@@ -1,0 +1,85 @@
+# cert-manager — TLS certificates from Let's Encrypt via the ingress-nginx solver.
+#
+# Wave -9: after ingress-nginx (the HTTP-01 solver needs its IngressClass) and
+# before anything that declares a Certificate.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-9"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.jetstack.io
+    chart: cert-manager
+    targetRevision: v1.16.1
+    helm:
+      values: |
+        crds:
+          enabled: true
+        replicaCount: 2
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            memory: 256Mi
+        prometheus:
+          enabled: true
+          servicemonitor:
+            enabled: true
+        # cert-manager must be able to solve HTTP-01 challenges through the
+        # ingress controller installed in wave -10.
+        ingressShim:
+          defaultIssuerName: letsencrypt-prod
+          defaultIssuerKind: ClusterIssuer
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+  annotations:
+    argocd.argoproj.io/sync-wave: "-8"
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: platform@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+  annotations:
+    argocd.argoproj.io/sync-wave: "-8"
+spec:
+  acme:
+    # Staging first, always: production has strict rate limits and a failed
+    # certificate burns a quota you cannot get back quickly.
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: platform@example.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx

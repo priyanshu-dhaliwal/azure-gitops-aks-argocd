@@ -1,0 +1,99 @@
+# kube-prometheus-stack — metrics, alerting, dashboards.
+#
+# Wave -6: last of the platform components, so its ServiceMonitors can discover
+# the others that already exist.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-6"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: 65.3.1
+    helm:
+      values: |
+        # Keep the stack lean: no Alertmanager HA, no Thanos sidecar.
+        alertmanager:
+          enabled: true
+          config:
+            route:
+              receiver: platform-oncall
+              group_by: [alertname, namespace]
+              group_wait: 30s
+              group_interval: 5m
+              repeat_interval: 4h
+            receivers:
+              - name: platform-oncall
+                webhook_configs:
+                  - url: http://alert-router.monitoring.svc.cluster.local:8080/alerts
+        prometheus:
+          prometheusSpec:
+            retention: 15d
+            resources:
+              requests: { cpu: 250m, memory: 1Gi }
+              limits: { memory: 4Gi }
+            # Discover ServiceMonitors in every namespace, not just this one.
+            serviceMonitorSelectorNilUsesHelmValues: false
+            podMonitorSelectorNilUsesHelmValues: false
+        grafana:
+          enabled: true
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          # Grafana admin credentials come from Key Vault, never from values.
+          envValueFrom:
+            GF_SECURITY_ADMIN_PASSWORD:
+              secretKeyRef:
+                name: grafana-admin
+                key: password
+        kubeEtcd:
+          enabled: false   # managed control plane: no etcd to scrape
+        kubeControllerManager:
+          enabled: false   # same
+        kubeScheduler:
+          enabled: false
+---
+# The alert that makes GitOps observable: if an Application has not synced in
+# 10 minutes, something is wrong and nobody is being told.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: argocd-gitops-slos
+  namespace: monitoring
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  groups:
+    - name: argocd.gitops
+      rules:
+        - alert: ArgoCDAppOutOfSync
+          expr: argocd_app_info{sync_status!="Synced"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ArgoCD app {{ $labels.name }} is OutOfSync"
+            description: "Drift has persisted for 10 minutes. Either sync is failing or self-heal is disabled."
+
+        - alert: ArgoCDAppDegraded
+          expr: argocd_app_info{health_status=~"Degraded|Missing"} == 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ArgoCD app {{ $labels.name }} is {{ $labels.health_status }}"
+
+        - alert: ArgoCDSyncFailing
+          expr: increase(argocd_app_sync_total{phase="Error"}[15m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "ArgoCD sync failing for {{ $labels.name }}"
+            description: "A sync error means the cluster cannot reach the desired state in Git."

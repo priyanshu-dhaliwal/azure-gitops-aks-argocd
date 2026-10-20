@@ -1,0 +1,20 @@
+# Cluster-specific values. Kept separate from the ApplicationSets so a new
+# cluster is a new directory, not a fork of the manifests.
+cluster:
+  name: aks-gito-dev
+  environment: dev
+  region: centralindia
+  domain: dev.example.com
+
+  # Replicas and resources differ per environment; these feed the app overlays.
+  api:
+    replicas: 1
+    cpu: 100m
+    memory: 128Mi
+  worker:
+    replicas: 1
+    cpu: 100m
+    memory: 128Mi
+
+  # Rolling delivery is a plain Deployment in dev; prod uses an Argo Rollout.
+  progressiveDelivery: false

@@ -1,0 +1,121 @@
+name: GitOps CI
+
+# Every change to what runs in the cluster passes through here. If this workflow
+# cannot render the manifests, they do not reach ArgoCD.
+on:
+  pull_request:
+    paths: ['apps/**', 'platform/**', 'policies/**', 'clusters/**', 'infra/**']
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  render:
+    name: Render every overlay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize, kubectl, conftest, kubeconform
+        run: |
+          curl -sLo kustomize.tar.gz https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz
+          tar -xzf kustomize.tar.gz && sudo mv kustomize /usr/local/bin/
+          curl -sLo kubectl https://dl.k8s.io/release/v1.30.5/bin/linux/amd64/kubectl && chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          curl -sLo conftest.tar.gz https://github.com/open-policy-agent/conftest/releases/download/v0.55.0/conftest_0.55.0_Linux_x86_64.tar.gz
+          tar -xzf conftest.tar.gz && sudo mv conftest /usr/local/bin/
+          curl -sL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar -xz
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: kustomize build all overlays
+        run: |
+          set -e
+          for dir in apps/overlays/*/*/; do
+            echo "==> $dir"
+            kustomize build "$dir" > /tmp/rendered-$(echo "$dir" | tr '/' '-').yaml
+          done
+
+      - name: Schema validation (kubeconform)
+        run: |
+          set -e
+          for f in /tmp/rendered-*.yaml; do
+            kubeconform -strict -ignore-missing-schemas -summary "$f"
+          done
+
+      - name: Policy check (conftest)
+        run: |
+          set -e
+          for f in /tmp/rendered-*.yaml; do
+            conftest test "$f" --policy policies/rego
+          done
+
+  no-secrets-in-git:
+    name: No Secret manifests committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if a Secret carries data
+        run: |
+          # A Secret with stringData/data is a secret in Git. Secrets must come
+          # from external-secrets (Key Vault), never from a manifest.
+          matches=$(grep -rl --include='*.yaml' -E '^kind: Secret$' apps platform clusters || true)
+          fail=0
+          for f in $matches; do
+            if grep -qE '^(data|stringData):' "$f"; then
+              echo "::error file=$f::Secret manifest contains data — use an ExternalSecret"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  argocd-validate:
+    name: ArgoCD manifests parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install argocd CLI
+        run: |
+          curl -sLo argocd https://github.com/argoproj/argo-cd/releases/download/v2.12.4/argocd-linux-amd64
+          chmod +x argocd && sudo mv argocd /usr/local/bin/
+          argocd version --client
+      - name: Every Application pins targetRevision to main
+        run: |
+          # GitOps property: Argo may only follow main. A feature branch in a
+          # manifest is a way to bypass review.
+          fail=0
+          for f in clusters/*/root-app.yaml clusters/*/*.yaml platform/*/*.yaml; do
+            [ -f "$f" ] || continue
+            if grep -q 'targetRevision:' "$f" && ! grep -qE 'targetRevision: *(main|[0-9])' "$f"; then
+              echo "::error file=$f::targetRevision must be main or a pinned chart version"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  terraform:
+    name: Terraform fmt & validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive infra/
+      - name: Validate
+        working-directory: infra
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  drift:
+    name: Drift check (advisory)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Note
+        run: |
+          echo "ArgoCD self-heals drift within 3 minutes on its own."
+          echo "This job is advisory: the authoritative check is"
+          echo "  ./scripts/drift-check.sh <env>"
+          echo "which fails if any Application is OutOfSync for more than 10 minutes."

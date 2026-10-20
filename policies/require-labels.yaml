@@ -1,0 +1,30 @@
+# Every pod must declare who owns it and who pays for it.
+# Enforced, not audited: an unlabelled workload is a workload nobody can be
+# asked about when it breaks.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-accountability-labels
+  annotations:
+    policies.kyverno.io/title: Require accountability labels
+    policies.kyverno.io/category: Governance
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-owner-and-cost-centre
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["api", "worker"]
+      validate:
+        message: >-
+          Pods must have labels owner and cost-centre. Add them to the pod
+          template in apps/base — this is how every workload stays accountable.
+        pattern:
+          metadata:
+            labels:
+              owner: "?*"
+              cost-centre: "?*"

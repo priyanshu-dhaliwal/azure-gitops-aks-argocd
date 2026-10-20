@@ -1,0 +1,32 @@
+# No privileged containers, no hostPath, no host network in workload namespaces.
+# The blast radius of a privileged pod is the node.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privileged-workloads
+  annotations:
+    policies.kyverno.io/title: Disallow privileged and host-access pods
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: critical
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: no-privileged-or-host-access
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["api", "worker"]
+      validate:
+        message: "Privileged pods, hostPath volumes and hostNetwork are not allowed in workload namespaces."
+        pattern:
+          spec:
+            =(hostNetwork): false
+            =(hostPID): false
+            =(hostIPC): false
+            containers:
+              - securityContext:
+                  =(privileged): false
+            =(volumes):
+              - =(hostPath): "null"

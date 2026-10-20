@@ -1,0 +1,104 @@
+# Prod uses an Argo Rollout instead of a Deployment, so a bad release is stopped
+# at 10% instead of after it has replaced every pod.
+#
+# The contract: the base Deployment stays the source of truth for the pod
+# template; this Rollout references the same image and is patched by the
+# overlay. dev keeps the plain Deployment.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: api-app
+  labels:
+    owner: platform-team
+    cost-centre: platform-001
+spec:
+  replicas: 3
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: api-app
+  template:
+    metadata:
+      labels:
+        app: api-app
+        owner: platform-team
+        cost-centre: platform-001
+      annotations:
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: api-app
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: gitp-prod-acr.azurecr.io/api:0.1.0
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: api-app-secrets
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits: { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+  strategy:
+    canary:
+      # 10% of traffic for 5 minutes; if the analysis succeeds, 50%, then 100%.
+      # Failure at any step rolls back to the previous ReplicaSet automatically.
+      maxSurge: 1
+      maxUnavailable: 0
+      steps:
+        - setWeight: 10
+        - pause: { duration: 5m }
+        - analysis:
+            templates:
+              - templateName: success-rate
+            args:
+              - name: service-name
+                value: api-app
+        - setWeight: 50
+        - pause: { duration: 10m }
+        - analysis:
+            templates:
+              - templateName: success-rate
+            args:
+              - name: service-name
+                value: api-app
+        - setWeight: 100
+      trafficRouting:
+        nginx:
+          # ingress-nginx splits traffic by annotation; no service mesh needed.
+          stableIngress: api-app
+          annotationPrefix: nginx.ingress.kubernetes.io
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate
+spec:
+  args:
+    - name: service-name
+  metrics:
+    - name: success-rate
+      interval: 1m
+      # Two consecutive failures abort the rollout.
+      failureLimit: 2
+      successCondition: result[0] >= 0.99
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring:9090
+          query: |
+            sum(rate(nginx_ingress_controller_requests{
+              ingress=~"{{args.service-name}}", status!~"5.*"}[5m]))
+            /
+            sum(rate(nginx_ingress_controller_requests{
+              ingress=~"{{args.service-name}}"}[5m]))

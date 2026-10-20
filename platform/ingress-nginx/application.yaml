@@ -1,0 +1,62 @@
+# ingress-nginx — the cluster's single ingress point.
+#
+# Helm chart from upstream (the source of truth), with our values. Argo syncs
+# this Application first (wave -10) because every workload Ingress depends on it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ingress-nginx
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://kubernetes.github.io/ingress-nginx
+    chart: ingress-nginx
+    targetRevision: 4.11.3
+    helm:
+      values: |
+        controller:
+          replicaCount: 2
+          # Run on the system pool: ingress must survive a workload node drain.
+          nodeSelector:
+            nodepool-type: system
+          tolerations:
+            - key: workload
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          metrics:
+            enabled: true
+            serviceMonitor:
+              enabled: true
+          # Azure Load Balancer with a stable private IP; public exposure is via
+          # Front Door in front of this, not a raw public IP.
+          service:
+            annotations:
+              service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: /healthz
+          config:
+            use-forwarded-headers: "true"
+            proxy-body-size: "8m"
+            ssl-protocols: "TLSv1.2 TLSv1.3"
+          admissionWebhooks:
+            enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ingress-nginx
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

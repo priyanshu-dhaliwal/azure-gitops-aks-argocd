@@ -1,0 +1,27 @@
+# Images must come from our ACR.
+# The full supply-chain control is image signature verification (cosign); this is
+# the registry allow-list that makes that possible, and it is enforced today.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-image-registries
+  annotations:
+    policies.kyverno.io/title: Restrict image registries
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: only-approved-registries
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["api", "worker"]
+      validate:
+        message: "Images must be pulled from the platform ACR."
+        pattern:
+          spec:
+            containers:
+              - image: "*/acr.azurecr.io/* | acr.azurecr.io/*"

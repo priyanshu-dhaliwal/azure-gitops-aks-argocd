@@ -1,0 +1,17 @@
+cluster:
+  name: aks-gitp-prod
+  environment: prod
+  region: centralindia
+  domain: example.com
+
+  api:
+    replicas: 3
+    cpu: 500m
+    memory: 512Mi
+  worker:
+    replicas: 2
+    cpu: 250m
+    memory: 256Mi
+
+  # Prod rolls out as a canary: 10% -> 50% -> 100%, gated on analysis.
+  progressiveDelivery: true

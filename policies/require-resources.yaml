@@ -1,0 +1,32 @@
+# Every container must declare CPU and memory requests and limits.
+# Without limits, one leaky pod evicts its neighbours; without requests, the
+# scheduler is guessing.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-limits
+  annotations:
+    policies.kyverno.io/title: Require resource requests and limits
+    policies.kyverno.io/category: Reliability
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-requests-and-limits
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["api", "worker"]
+      validate:
+        message: "Every container must set resources.requests and resources.limits for cpu and memory."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    memory: "?*"

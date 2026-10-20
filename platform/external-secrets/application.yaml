@@ -1,0 +1,64 @@
+# external-secrets — pulls secrets from Azure Key Vault via workload identity.
+#
+# Wave -8: the CRDs must exist before any app declares a SecretStore.
+# This is the mechanism that keeps secrets out of Git (GitOps property 6).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: external-secrets
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-8"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://charts.external-secrets.io
+    chart: external-secrets
+    targetRevision: 0.10.7
+    helm:
+      values: |
+        replicaCount: 2
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            memory: 256Mi
+        serviceAccount:
+          annotations:
+            # Federated identity: no client secret exists anywhere.
+            azure.workload.identity/client-id: REPLACE_WITH_IDENTITY_CLIENT_ID
+        podLabels:
+          azure.workload.identity/use: "true"
+        metrics:
+          serviceMonitor:
+            enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-secrets
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+---
+# One ClusterSecretStore, used by every namespace. It authenticates with the
+# external-secrets operator's own workload identity.
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: azure-key-vault
+  annotations:
+    argocd.argoproj.io/sync-wave: "-7"
+spec:
+  provider:
+    azurekv:
+      authType: WorkloadIdentity
+      vaultUrl: "https://REPLACE_WITH_VAULT_NAME.vault.azure.net"
+      serviceAccountRef:
+        name: external-secrets
+        namespace: external-secrets
